@@ -130,6 +130,9 @@ RAG_PROMPT = ChatPromptTemplate.from_template("""你是一个专业的知识助�
 ## 📄 相关文档内容
 {context}
 
+## 💬 对话历史
+{history}
+
 ## ❓ 用户问题
 {question}
 
@@ -142,10 +145,36 @@ def format_docs(docs: list[Document]) -> str:
         parts.append(f"--- [来源{i+1}: {source}] ---\n{doc.page_content}")
     return "\n\n".join(parts)
 
+# ─── 多轮会话管理（内存版 + 滑动窗口）──────────────
+_session_history: dict[str, list[dict]] = {}
+
+def get_history(session_id: str) -> list[dict]:
+    """取会话历史"""
+    return _session_history.get(session_id, [])
+
+def format_history(session_id: str, max_turns: int = 6) -> str:
+    """把最近 N 轮对话格式化成文本（滑动窗口：只取最近 max_turns*2 条）"""
+    history = get_history(session_id)
+    if not history:
+        return "（无历史对话）"
+    recent = history[-(max_turns * 2):]
+    return "\n".join(
+        f"{'用户' if h['role'] == 'user' else '助手'}: {h['content']}" for h in recent
+    )
+
+def add_history(session_id: str, role: str, content: str, max_len: int = 40):
+    """追加一条历史，超过 max_len 就滑动窗口丢弃最旧的（防无限增长）"""
+    if session_id not in _session_history:
+        _session_history[session_id] = []
+    _session_history[session_id].append({"role": role, "content": content})
+    if len(_session_history[session_id]) > max_len:
+        _session_history[session_id] = _session_history[session_id][-max_len:]
+
 # ─── API 模型 ────────────────────────────────────────
 class Question(BaseModel):
     text: str
     k: int = 5
+    session_id: str = "default"
 
 # ─── 接口 1: 状态检查 ─────────────────────────────────
 @app.get("/api/health")
@@ -166,8 +195,13 @@ async def ask(question: Question):
         return {"answer": "未找到相关文档内容。", "sources": []}
 
     context = format_docs(docs)
-    prompt = RAG_PROMPT.format(context=context, question=question.text)
+    history_text = format_history(question.session_id)
+    prompt = RAG_PROMPT.format(context=context, history=history_text, question=question.text)
     result = llm.invoke(prompt)
+
+    # 更新会话历史（滑动窗口，最多 40 条）
+    add_history(question.session_id, "user", question.text)
+    add_history(question.session_id, "assistant", result.content)
 
     return {
         "answer": result.content,
@@ -195,15 +229,22 @@ async def ask_stream(question: Question):
         ]
     }, ensure_ascii=False)
 
-    prompt = RAG_PROMPT.format(context=context, question=question.text)
+    history_text = format_history(question.session_id)
+    prompt = RAG_PROMPT.format(context=context, history=history_text, question=question.text)
 
     async def event_stream():
         yield f"data: {sources_data}\n\n"
 
+        full_answer = []  # 收集完整回答，流式结束后存历史
         async for chunk in llm.astream(prompt):
             if chunk.content:
+                full_answer.append(chunk.content)
                 data = json.dumps({"type": "token", "content": chunk.content}, ensure_ascii=False)
                 yield f"data: {data}\n\n"
+
+        # 流式结束后更新会话历史
+        add_history(question.session_id, "user", question.text)
+        add_history(question.session_id, "assistant", "".join(full_answer))
 
         yield "data: [DONE]\n\n"
 
