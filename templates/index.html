@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📚 智能文档问答平台</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: #0f1117; color: #e1e4e8;
+    min-height: 100vh; display: flex; flex-direction: column;
+  }
+  .header {
+    background: #161b22; border-bottom: 1px solid #30363d;
+    padding: 16px 24px; display: flex; align-items: center; gap: 12px;
+  }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.ready { background: #3fb950; }
+  .dot.offline { background: #f85149; }
+  .dot.loading { background: #d29922; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+
+  .main {
+    flex: 1; max-width: 900px; width: 100%; margin: 0 auto;
+    padding: 24px; display: flex; flex-direction: column;
+  }
+
+  .chat-area {
+    flex: 1; overflow-y: auto; margin-bottom: 24px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  .msg {
+    padding: 12px 16px; border-radius: 12px; max-width: 85%;
+    line-height: 1.6; font-size: 15px; word-break: break-word;
+  }
+  .msg.user {
+    align-self: flex-end; background: #1f6feb; color: #fff;
+  }
+  .msg.assistant {
+    align-self: flex-start; background: #21262d; border: 1px solid #30363d;
+  }
+
+  .sources {
+    font-size: 12px; color: #8b949e; margin-top: 8px;
+    padding-top: 8px; border-top: 1px solid #30363d;
+  }
+  .sources span { 
+    display: inline-block; background: #30363d; padding: 2px 8px; 
+    border-radius: 4px; margin: 2px 4px 2px 0; cursor: pointer; 
+  }
+  .sources span:hover { background: #484f58; }
+
+  .input-area {
+    display: flex; gap: 8px; background: #161b22; 
+    border: 1px solid #30363d; border-radius: 12px; padding: 12px;
+  }
+  .input-area textarea {
+    flex: 1; background: transparent; border: none; color: #e1e4e8;
+    font-size: 15px; resize: none; outline: none; font-family: inherit;
+    min-height: 44px; max-height: 120px;
+  }
+  .input-area textarea::placeholder { color: #484f58; }
+  .btn {
+    background: #1f6feb; color: #fff; border: none;
+    padding: 8px 20px; border-radius: 8px; font-size: 14px;
+    cursor: pointer; font-weight: 500; white-space: nowrap;
+    transition: background .2s;
+  }
+  .btn:hover { background: #388bfd; }
+  .btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    color: #484f58; text-align: center;
+  }
+  .empty-state .icon { font-size: 64px; }
+  .empty-state h2 { font-size: 24px; color: #8b949e; }
+  .empty-state p { font-size: 14px; max-width: 400px; }
+
+  .typing::after {
+    content: '▊'; animation: blink 1s infinite;
+  }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📚 智能文档问答平台</h1>
+  <div class="status">
+    <div class="dot loading" id="statusDot"></div>
+    <span id="statusText">检查中...</span>
+  </div>
+</div>
+
+<div class="main">
+  <div class="chat-area" id="chatArea">
+    <div class="empty-state" id="emptyState">
+      <div class="icon">💬</div>
+      <h2>向你的知识库提问</h2>
+      <p>已加载 AI Agent 学习笔记、技术文档等知识。试试问一个关于 RAG、MCP 或多 Agent 协作的问题。</p>
+    </div>
+  </div>
+
+  <div class="input-area">
+    <textarea id="questionInput" placeholder="输入你的问题，按 Enter 发送（Shift+Enter 换行）" rows="1"></textarea>
+    <button class="btn" id="sendBtn" onclick="sendQuestion()">发送</button>
+  </div>
+</div>
+
+<script>
+const chatArea = document.getElementById('chatArea');
+const questionInput = document.getElementById('questionInput');
+const sendBtn = document.getElementById('sendBtn');
+const emptyState = document.getElementById('emptyState');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+let isStreaming = false;
+
+// ─── 检查服务状态 ──────────────────────────────────
+async function checkHealth() {
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    if (data.status === 'ready') {
+      statusDot.className = 'dot ready';
+      statusText.textContent = `已就绪 · ${data.document_count} 个知识片段`;
+    } else {
+      statusDot.className = 'dot offline';
+      statusText.textContent = '未索引 · 请先运行 ingest.py';
+    }
+  } catch(e) {
+    statusDot.className = 'dot offline';
+    statusText.textContent = '服务未启动';
+  }
+}
+checkHealth();
+
+// ─── 发送问题 ──────────────────────────────────────
+questionInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendQuestion();
+  }
+});
+
+async function sendQuestion() {
+  const text = questionInput.value.trim();
+  if (!text || isStreaming) return;
+
+  isStreaming = true;
+  sendBtn.disabled = true;
+  questionInput.value = '';
+
+  // 隐藏空状态
+  if (emptyState) emptyState.style.display = 'none';
+
+  // 添加用户消息
+  addMessage('user', text);
+
+  // 添加助手消息占位
+  const assistantMsg = addMessage('assistant', '', true);
+
+  try {
+    const res = await fetch('/api/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, k: 5 })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let sources = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // 保留不完整的行
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') {
+          // 添加来源信息
+          if (sources.length > 0) {
+            const sourcesDiv = document.createElement('div');
+            sourcesDiv.className = 'sources';
+            sourcesDiv.innerHTML = '📎 参考来源：' + sources.map(s => 
+              `<span title="${s.preview}">${s.source}</span>`
+            ).join('');
+            assistantMsg.appendChild(sourcesDiv);
+          }
+          assistantMsg.classList.remove('typing');
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === 'sources') {
+            sources = parsed.sources;
+          } else if (parsed.type === 'token') {
+            assistantMsg.textContent += parsed.content;
+            chatArea.scrollTop = chatArea.scrollHeight;
+          }
+        } catch(e) { /* 忽略解析错误 */ }
+      }
+    }
+  } catch(e) {
+    assistantMsg.textContent = '❌ 请求失败: ' + e.message;
+    assistantMsg.classList.remove('typing');
+  }
+
+  isStreaming = false;
+  sendBtn.disabled = false;
+  questionInput.focus();
+}
+
+function addMessage(role, text, isStreaming = false) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  if (isStreaming) div.classList.add('typing');
+  div.textContent = text;
+  chatArea.appendChild(div);
+  chatArea.scrollTop = chatArea.scrollHeight;
+  return div;
+}
+</script>
+</body>
+</html>
