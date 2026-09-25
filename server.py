@@ -23,6 +23,8 @@ from pydantic import BaseModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
+import jieba
+from rank_bm25 import BM25Okapi
 
 # ─── 配置 ───────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
@@ -54,6 +56,7 @@ class SimpleVectorStore:
     def __init__(self):
         self.docs: list[Document] = []
         self.vectors: np.ndarray | None = None
+        self.bm25: BM25Okapi | None = None
     
     def load(self, path: Path):
         """从 pickle 文件加载"""
@@ -61,31 +64,45 @@ class SimpleVectorStore:
             data = pickle.load(f)
         self.docs = data["docs"]
         self.vectors = np.array(data["embeddings"])
+        # 构建 BM25 索引（jieba 中文分词）
+        self.bm25 = BM25Okapi([list(jieba.cut(doc.page_content)) for doc in self.docs])
     
     @property
     def count(self) -> int:
         return len(self.docs)
     
     def search(self, query: str, k: int = 5) -> list[Document]:
-        """余弦相似度搜索"""
+        """混合检索：BM25 关键词 + 向量语义，归一化后加权融合"""
+        # 1. 向量检索（余弦相似度）
         query_vec = np.array(embeddings_model.embed_query(query))
-        
-        # 归一化
         query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
         vecs_norm = self.vectors / (np.linalg.norm(self.vectors, axis=1, keepdims=True) + 1e-10)
-        
-        # 余弦相似度
-        similarities = np.dot(vecs_norm, query_norm)
-        
+        vec_scores = np.dot(vecs_norm, query_norm)
+
+        # 2. BM25 关键词检索
+        query_tokens = list(jieba.cut(query))
+        bm25_scores = np.array(self.bm25.get_scores(query_tokens), dtype=float)
+
+        # 3. 归一化 + 加权融合（0.5 向量 + 0.5 BM25）
+        def _normalize(x: np.ndarray) -> np.ndarray:
+            x_min, x_max = x.min(), x.max()
+            if x_max - x_min < 1e-10:
+                return np.zeros_like(x)
+            return (x - x_min) / (x_max - x_min)
+
+        final_scores = 0.5 * _normalize(vec_scores) + 0.5 * _normalize(bm25_scores)
+
         # Top-K
-        top_indices = np.argsort(similarities)[::-1][:k]
-        
+        top_indices = np.argsort(final_scores)[::-1][:k]
+
         results = []
         for idx in top_indices:
             doc = self.docs[idx]
-            doc.metadata["_score"] = float(similarities[idx])
+            doc.metadata["_score"] = float(final_scores[idx])
+            doc.metadata["_vec_score"] = round(float(vec_scores[idx]), 4)
+            doc.metadata["_bm25_score"] = round(float(bm25_scores[idx]), 4)
             results.append(doc)
-        
+
         return results
 
 _vectorstore = SimpleVectorStore()

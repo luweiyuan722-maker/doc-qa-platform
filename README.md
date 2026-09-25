@@ -7,7 +7,7 @@
 - **多格式文档加载**：支持 PDF / txt / md / html
 - **中文友好切分**：RecursiveCharacterTextSplitter，按段落、换行、中文标点（。！？；）递归切分，chunk 大小可调
 - **Embedding 向量化**：智谱 AI `embedding-2`
-- **向量检索**：numpy 实现余弦相似度 Top-K 检索，pickle 持久化（自研轻量向量存储，无外部向量数据库依赖）
+- **混合检索**：BM25 关键词 + 向量语义（余弦相似度），归一化后加权融合，提升召回准确率
 - **防幻觉生成**：DeepSeek `deepseek-chat`，严格基于检索到的文档回答，无相关信息时明确拒绝编造
 - **SSE 流式输出**：先返回检索来源，再逐 token 流式生成
 - **前端页面 + Docker 容器化部署**
@@ -63,7 +63,7 @@ doc-qa-platform/
 ```
 文档 ──加载──> 切分 ──embedding──> 向量库（pickle 持久化）
                                       │
-用户问题 ──embedding──> 余弦相似度 ──> Top-K 检索 ──> 拼 prompt ──> LLM ──> 流式返回
+用户问题 ──> BM25 关键词 + 向量语义（余弦相似度）──> 加权融合 Top-K ──> 拼 prompt ──> LLM ──> 流式返回
 ```
 
 ## 📄 License
